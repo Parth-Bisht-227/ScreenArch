@@ -1,6 +1,8 @@
 from pathlib import Path
 from datetime import datetime, timezone
+from contextlib import contextmanager
 import hashlib
+import json
 import sqlite3
 
 from PIL import Image
@@ -8,11 +10,19 @@ from PIL import Image
 DB_PATH = Path(__file__).parent / "data" / "screenshots.db"
 IMAGE_EXTENSIONS = {".png", ".jpg", ".jpeg", ".webp", ".bmp", ".tif", ".tiff"}
 
+@contextmanager
 def connect():
     DB_PATH.parent.mkdir(parents=True, exist_ok=True)
     conn = sqlite3.connect(DB_PATH)
     conn.row_factory = sqlite3.Row
-    return conn
+    try:
+        yield conn
+        conn.commit()
+    except Exception:
+        conn.rollback()
+        raise
+    finally:
+        conn.close()
 
 def init_db():
     with connect() as conn:
@@ -32,6 +42,67 @@ def init_db():
         """)
         conn.execute("CREATE INDEX IF NOT EXISTS idx_screenshots_path ON screenshots(path)")
         conn.execute("CREATE VIRTUAL TABLE IF NOT EXISTS screenshot_fts USING fts5(path UNINDEXED, ocr_text, content='')")
+        conn.execute("""
+        CREATE TABLE IF NOT EXISTS screenshot_classifications (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            screenshot_id INTEGER NOT NULL,
+            prompt_hash TEXT NOT NULL,
+            prompt TEXT NOT NULL,
+            model TEXT NOT NULL,
+            input_hash TEXT NOT NULL,
+            category TEXT NOT NULL,
+            reason TEXT NOT NULL,
+            evidence TEXT NOT NULL,
+            confidence REAL NOT NULL CHECK(confidence >= 0 AND confidence <= 1),
+            needs_review INTEGER NOT NULL CHECK(needs_review IN (0, 1)),
+            result_status TEXT NOT NULL DEFAULT 'legacy',
+            model_duration_seconds REAL NOT NULL DEFAULT 0,
+            model_request_durations TEXT NOT NULL DEFAULT '[]',
+            approved INTEGER NOT NULL DEFAULT 0 CHECK(approved IN (0, 1)),
+            approved_category TEXT,
+            created_at TEXT NOT NULL,
+            UNIQUE(screenshot_id, prompt_hash, model, input_hash)
+        )
+        """)
+        classification_columns = {
+            row["name"]
+            for row in conn.execute("PRAGMA table_info(screenshot_classifications)")
+        }
+        for name, definition in (
+            ("result_status", "TEXT NOT NULL DEFAULT 'legacy'"),
+            ("model_duration_seconds", "REAL NOT NULL DEFAULT 0"),
+            ("model_request_durations", "TEXT NOT NULL DEFAULT '[]'"),
+            ("approved", "INTEGER NOT NULL DEFAULT 0"),
+            ("approved_category", "TEXT"),
+        ):
+            if name not in classification_columns:
+                conn.execute(
+                    f"ALTER TABLE screenshot_classifications ADD COLUMN {name} {definition}"
+                )
+        conn.execute("""
+            UPDATE screenshot_classifications
+            SET result_status = CASE WHEN needs_review = 1 THEN 'needs_review' ELSE 'classified' END
+            WHERE result_status = 'legacy'
+        """)
+        conn.execute("""
+        CREATE INDEX IF NOT EXISTS idx_classifications_prompt_model
+        ON screenshot_classifications(prompt_hash, model)
+        """)
+        conn.execute("""
+        CREATE TABLE IF NOT EXISTS organization_operations (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            classification_id INTEGER NOT NULL,
+            source_path TEXT NOT NULL,
+            output_dir TEXT NOT NULL,
+            destination_path TEXT NOT NULL,
+            operation TEXT NOT NULL CHECK(operation IN ('copy', 'move')),
+            file_hash TEXT NOT NULL,
+            status TEXT NOT NULL,
+            error TEXT NOT NULL DEFAULT '',
+            updated_at TEXT NOT NULL,
+            UNIQUE(classification_id, operation, output_dir)
+        )
+        """)
 
 def _hash_file(path: Path):
     digest = hashlib.sha256()
@@ -145,3 +216,145 @@ def get_item(item_id):
     with connect() as conn:
         row = conn.execute("SELECT * FROM screenshots WHERE id = ?", (item_id,)).fetchone()
     return _dict(row)
+
+def list_classification_candidates():
+    with connect() as conn:
+        rows = conn.execute("SELECT * FROM screenshots ORDER BY indexed_at DESC").fetchall()
+    return [_dict(row) for row in rows]
+
+def get_saved_classification(item_id, prompt_hash, model, input_hash):
+    with connect() as conn:
+        row = conn.execute("""
+            SELECT * FROM screenshot_classifications
+            WHERE screenshot_id = ? AND prompt_hash = ? AND model = ? AND input_hash = ?
+        """, (item_id, prompt_hash, model, input_hash)).fetchone()
+    return _dict(row)
+
+def save_classification(item_id, prompt_hash, prompt, model, input_hash, result):
+    created_at = datetime.now(timezone.utc).isoformat(timespec="seconds")
+    with connect() as conn:
+        conn.execute("""
+            INSERT INTO screenshot_classifications(
+                screenshot_id, prompt_hash, prompt, model, input_hash, category,
+                reason, evidence, confidence, needs_review, result_status,
+                model_duration_seconds, model_request_durations, approved,
+                approved_category, created_at
+            )
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, NULL, ?)
+            ON CONFLICT(screenshot_id, prompt_hash, model, input_hash) DO UPDATE SET
+                prompt=excluded.prompt,
+                category=excluded.category,
+                reason=excluded.reason,
+                evidence=excluded.evidence,
+                confidence=excluded.confidence,
+                needs_review=excluded.needs_review,
+                result_status=excluded.result_status,
+                model_duration_seconds=excluded.model_duration_seconds,
+                model_request_durations=excluded.model_request_durations,
+                approved=0,
+                approved_category=NULL,
+                created_at=excluded.created_at
+        """, (
+            item_id, prompt_hash, prompt, model, input_hash, result["category"],
+            result["reason"], result["evidence"], result["confidence"],
+            int(result["needs_review"]), result.get("status", "needs_review"),
+            result.get("model_duration_seconds", 0.0),
+            json.dumps(result.get("model_request_durations", [])),
+            created_at
+        ))
+
+def list_classifications(prompt_hash, model):
+    with connect() as conn:
+        rows = conn.execute("""
+            SELECT c.*, s.path, s.file_size, s.modified_at, s.width, s.height,
+                   s.ocr_text, s.ocr_status
+            FROM screenshot_classifications AS c
+            JOIN screenshots AS s ON s.id = c.screenshot_id
+            WHERE c.prompt_hash = ? AND c.model = ?
+            ORDER BY c.created_at DESC
+        """, (prompt_hash, model)).fetchall()
+    return [_dict(row) for row in rows]
+
+def save_review_decision(classification_id, category, approved):
+    category = category.strip()
+    if not category:
+        raise ValueError("Choose a category before saving the review decision.")
+    with connect() as conn:
+        cursor = conn.execute("""
+            UPDATE screenshot_classifications
+            SET approved_category = ?, approved = ?
+            WHERE id = ?
+        """, (category, int(bool(approved)), classification_id))
+        if cursor.rowcount != 1:
+            raise ValueError(f"Classification {classification_id} no longer exists.")
+
+def approve_suitable_classifications(classification_ids):
+    ids = list(dict.fromkeys(classification_ids))
+    if not ids:
+        return 0
+    placeholders = ",".join("?" for _ in ids)
+    with connect() as conn:
+        cursor = conn.execute(f"""
+            UPDATE screenshot_classifications
+            SET approved = 1
+            WHERE id IN ({placeholders})
+              AND result_status = 'classified'
+              AND needs_review = 0
+              AND lower(COALESCE(approved_category, category)) != 'needs review'
+        """, ids)
+        return cursor.rowcount
+
+def get_approved_classifications():
+    with connect() as conn:
+        rows = conn.execute("""
+            SELECT c.*, s.path, s.file_size AS source_file_size,
+                   s.modified_at AS source_modified_at,
+                   s.content_hash AS source_content_hash
+            FROM screenshot_classifications AS c
+            JOIN screenshots AS s ON s.id = c.screenshot_id
+            WHERE c.approved = 1
+            ORDER BY c.id
+        """).fetchall()
+    results = [_dict(row) for row in rows]
+    for row in results:
+        row["category"] = row["approved_category"] or row["category"]
+        row["needs_review"] = bool(row["needs_review"])
+    return results
+
+def get_organization_operation(classification_id, operation, output_dir):
+    with connect() as conn:
+        row = conn.execute("""
+            SELECT * FROM organization_operations
+            WHERE classification_id = ? AND operation = ? AND output_dir = ?
+        """, (classification_id, operation, output_dir)).fetchone()
+    return _dict(row)
+
+def save_organization_operation(
+    classification_id,
+    source_path,
+    output_dir,
+    destination_path,
+    operation,
+    file_hash,
+    status,
+    error="",
+):
+    updated_at = datetime.now(timezone.utc).isoformat(timespec="seconds")
+    with connect() as conn:
+        conn.execute("""
+            INSERT INTO organization_operations(
+                classification_id, source_path, output_dir, destination_path,
+                operation, file_hash, status, error, updated_at
+            )
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(classification_id, operation, output_dir) DO UPDATE SET
+                source_path=excluded.source_path,
+                destination_path=excluded.destination_path,
+                file_hash=excluded.file_hash,
+                status=excluded.status,
+                error=excluded.error,
+                updated_at=excluded.updated_at
+        """, (
+            classification_id, source_path, output_dir, destination_path,
+            operation, file_hash, status, error, updated_at
+        ))
