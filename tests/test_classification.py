@@ -62,6 +62,9 @@ def test_categories_are_read_from_the_user_instruction():
         "Sort screenshots into Food and Drink, Home, and Needs Review."
     ) == ["Food and Drink", "Home", "Needs Review"]
     assert classification.categories_from_prompt(
+        "Sort screenshots into Job Search, Engineering, Content Creation, and Miscellaneous."
+    ) == ["Job Search", "Engineering", "Content Creation", "Miscellaneous"]
+    assert classification.categories_from_prompt(
         "Organize screenshots into Mercari Job prep and informational content folders only."
     ) == ["Mercari Job prep", "informational content"]
 

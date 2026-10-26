@@ -220,10 +220,7 @@ st.caption(
 organization_prompt = st.text_area(
     "Organization instruction",
     value="",
-    placeholder=(
-        "Organize screenshots into Work, Personal, and Needs Review. "
-        "Put uncertain screenshots into Needs Review. Do not delete anything."
-    ),
+    placeholder="Sort screenshots into Job Search, Engineering, Content Creation, and Miscellaneous.",
     height=110,
     key="organization_prompt",
 )
@@ -359,9 +356,10 @@ if current_results:
 
     st.subheader("Review and approve")
     st.caption(
-        "Category changes and approvals are saved only when submitted. Low confidence is treated as review-required "
-        f"below {classification.LOW_CONFIDENCE_THRESHOLD:.1f}. 'Approve all suitable results' excludes review-required "
-        "items and Needs Review categories."
+        "For a Needs Review or miscategorized result, choose its correct Category, check Approved only after "
+        "you verify it, and save the form. The approved category becomes its destination folder; unapproved "
+        f"items stay untouched. Low confidence below {classification.LOW_CONFIDENCE_THRESHOLD:.1f} requires review. "
+        "'Approve all suitable results' excludes review-required items and Needs Review categories."
     )
     try:
         prompt_categories = classification.categories_from_prompt(organization_prompt)
@@ -434,9 +432,9 @@ if current_results:
 
     st.subheader("Organize approved screenshots")
     st.caption(
-        "The default is to move approved screenshots into category folders under "
-        "ScreenArch_Organized. Each move requires confirmation and is verified before "
-        "the original path is removed from the active gallery."
+        "The default is to copy approved screenshots into category folders under "
+        "ScreenArch_Organized, keeping the originals. Moving is available with separate "
+        "confirmation and is verified before the original path is removed from the active gallery."
     )
     if active_folder:
         source_folder_exists = True
@@ -457,7 +455,7 @@ if current_results:
         st.error("The selected source folder does not exist or is not a directory.")
     operation = st.selectbox(
         "File operation",
-        ["Move (remove originals)", "Copy (keep originals)"],
+        ["Copy (keep originals)", "Move (remove originals)"],
     )
     move_confirmed = False
     if operation.startswith("Move"):

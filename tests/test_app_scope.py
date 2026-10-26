@@ -27,7 +27,9 @@ def test_gallery_and_search_follow_selected_folder(tmp_path, monkeypatch):
             Image.new("RGB", (20, 20), "white").save(folder / f"{prefix}-{index}.png")
         storage.index_folder(folder)
 
-    at = AppTest.from_file(str(Path(__file__).parents[1] / "app.py")).run()
+    at = AppTest.from_file(
+        str(Path(__file__).parents[1] / "app.py"), default_timeout=10
+    ).run()
     at.text_input(key="source_folder").set_value(str(folder_b)).run()
 
     assert not at.exception
@@ -45,7 +47,7 @@ def test_gallery_and_search_follow_selected_folder(tmp_path, monkeypatch):
     assert any("**a-0.png**" in item.value for item in at.markdown)
 
 
-def test_move_is_default_and_requires_confirmation(tmp_path, monkeypatch):
+def test_copy_is_default_and_move_requires_confirmation(tmp_path, monkeypatch):
     monkeypatch.setattr(storage, "DB_PATH", tmp_path / "screenshots.db")
     storage.init_db()
     folder = tmp_path / "selected"
@@ -93,13 +95,26 @@ def test_move_is_default_and_requires_confirmation(tmp_path, monkeypatch):
     )
     storage.save_review_decision(saved["id"], "Work", True)
 
-    at = AppTest.from_file(str(Path(__file__).parents[1] / "app.py")).run()
+    at = AppTest.from_file(
+        str(Path(__file__).parents[1] / "app.py"), default_timeout=10
+    ).run()
     at.text_input(key="source_folder").set_value(str(folder)).run()
     at.text_area(key="organization_prompt").set_value(prompt).run()
 
     assert not at.exception
+    assert any(
+        "For a Needs Review or miscategorized result" in item.value
+        for item in at.caption
+    )
     operation = next(widget for widget in at.selectbox if widget.label == "File operation")
-    assert operation.value == "Move (remove originals)"
+    assert operation.value == "Copy (keep originals)"
+    assert not any(
+        widget.label.startswith("I understand that moving removes")
+        for widget in at.checkbox
+    )
+
+    operation.select("Move (remove originals)").run()
+    assert not at.exception
     assert any(
         widget.label.startswith("I understand that moving removes")
         for widget in at.checkbox

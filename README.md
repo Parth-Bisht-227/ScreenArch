@@ -82,21 +82,17 @@ Install Tesseract with your system package manager (for example, `brew install t
 
 1. In the sidebar, enter the path to a local screenshot folder. Start with a small test folder.
 2. Select **Scan and index folder**. ScreenArch indexes image metadata and runs Tesseract OCR locally. Use **Retry failed OCR** after correcting an OCR installation problem.
-3. Enter an organization instruction that explicitly names the categories. Comma-separated names or a numbered list with descriptions are supported, for example:
+3. Enter a short organization instruction that explicitly names the categories, for example:
 
    ```text
-   Organize screenshots into following categories:
-   1. Content Inspirations [personal brand and growth]
-   2. Engineering Resources [study resources]
-   3. Job Help [career and job preparation]
-   4. Miscellaneous [anything that does not clearly fit]
+   Sort screenshots into Job Search, Engineering, Content Creation, and Miscellaneous.
    ```
 
-   Use **Needs Review** or **Miscellaneous** for uncertain screenshots; those results remain review-required when the model marks them uncertain.
+   The category names define the model's allowed choices. Short names make the intended destination clear; the model cannot add categories that are not in the list.
 4. Enter the exact installed Ollama model name shown by `ollama list` (for example, `gemma3:4b`). Select **Check local model** to verify the local service and model.
 5. Select **Run classification** and follow the progress and per-image status. Use the category and review-status filters to inspect results.
-6. In **Review and approve**, change categories if needed and save category/approval changes. Approve screenshots explicitly; **Approve all suitable results** excludes review-required results and the **Needs Review** category.
-7. In **Organize approved screenshots**, choose an output directory. **Move (remove originals)** is selected by default and requires separate confirmation; choose **Copy (keep originals)** if you want to preserve source files. Only explicitly approved, non-review screenshots are organized.
+6. In **Review and approve**, correct any category in the table. For a **Needs Review** item, choose the category you think fits, check **Approved** only after reviewing its OCR evidence, and save the form. The approved category becomes its destination folder. Leave **Approved** unchecked to keep it out of organization; **Approve all suitable results** excludes review-required results and the **Needs Review** category.
+7. In **Organize approved screenshots**, choose an output directory. **Copy (keep originals)** is selected by default. Select **Move (remove originals)** only if you intend to remove approved source files, then confirm separately. Only explicitly approved, non-review screenshots are organized.
 
 The sidebar search performs keyword search over extracted OCR text. The selected source folder scopes the gallery, search, classification results, and organization actions; switching folders keeps each folder's cached OCR and classification results in SQLite without mixing them in the current view. Full extracted text is available in each screenshot's collapsed **View extracted text** expander.
 
@@ -116,7 +112,7 @@ The sidebar search performs keyword search over extracted OCR text. The selected
 - The app has no cloud classification fallback. Initial package installation and Ollama model downloads require connectivity; do not assume every setup or update operation works offline.
 - Search is keyword-based. Semantic search and vision-based classification are not implemented.
 - Classification may be wrong. The confidence value is the model's self-assessment and is not calibrated; review and approve results before organizing files.
-- **Move (remove originals)** is the default organization action and requires separate confirmation. A source is removed only after its copy is verified; its SQLite OCR and classification records are retained, but the old path is hidden from the active gallery. **Copy (keep originals)** remains available. The generated `ScreenArch_Organized` folder and known organization output directories are excluded from subsequent indexing.
+- **Copy (keep originals)** is the default organization action. **Move (remove originals)** requires separate confirmation and removes a source only after its copy is verified; its SQLite OCR and classification records are retained, but the old path is hidden from the active gallery. The generated `ScreenArch_Organized` folder and known organization output directories are excluded from subsequent indexing.
 - ScreenArch is a local application, not a hosted multi-user service. Extracted text, file metadata, review decisions, and organization records are stored in the local SQLite database at `data/screenshots.db`; protect that database as it may contain text from private images.
 
 ## Current limitations
