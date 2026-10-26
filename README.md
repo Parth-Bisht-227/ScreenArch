@@ -1,82 +1,126 @@
-# Screenshot Archaeologist
+# ScreenArch
 
-A local-first app that turns a folder of screenshots into a searchable archive. It provides folder import, OCR, SQLite indexing, keyword search, a thumbnail review UI, and on-demand screenshot categorization with a locally running Ollama model.
+**The archaeologist for your screenshots.**
 
-## Privacy model
+A local-first searchable archive for your screenshots. ScreenArch indexes a local folder, extracts text with Tesseract OCR, and can classify screenshots from that text with a local Ollama model.
 
-- Screenshot files are not uploaded.
-- OCR runs locally through the installed Tesseract executable.
-- Classification sends OCR text and basic file metadata only to the configured local Ollama endpoint. No image files or OCR text are sent to a cloud service.
-- OCR text is treated as untrusted data; classification does not perform file operations.
-- Extracted text and file metadata are stored in `data/screenshots.db` beside the app.
-- Copy is the default organization operation and preserves source screenshots. Moving is available only as an explicitly selected and confirmed operation.
-- Treat the SQLite database as sensitive: it can contain text extracted from private images.
+## Prerequisites
 
-## Requirements
+- Windows, macOS, or Linux.
+- Python 3.10 or newer (64-bit recommended).
+- Tesseract OCR installed separately from Python. On Windows, add the directory containing `tesseract.exe` to your `PATH`, then open a new terminal and verify with `tesseract --version`.
+- Ollama installed and running locally for AI classification. The app uses a model already installed in Ollama; it does not download models automatically.
+- A compatible local Ollama model, such as `gemma3:4b`, if you want AI classification. The selected model must be installed and its exact name must match `ollama list`.
 
-- Python 3.10+
-- Tesseract OCR installed separately
-- Windows, macOS, or Linux
+The Python dependencies are listed in `requirements.txt`. In addition to those packages, the app uses Python's standard library and the pandas dependency provided by Streamlit. Tesseract and Ollama are separate applications and are not installed by pip.
 
-### Install
+## Install on Windows
 
-1. Create and activate a virtual environment.
-2. Install Python dependencies:
-   ```bash
-   pip install -r requirements.txt
-   ```
-3. Install Tesseract OCR:
-   - Windows: install the Tesseract OCR Windows build and ensure `tesseract.exe` is on PATH.
-   - macOS: `brew install tesseract`
-   - Ubuntu/Debian: `sudo apt install tesseract-ocr`
-4. Install and start Ollama separately, then install a Gemma model in a terminal:
-   ```bash
-   ollama pull gemma3:4b
-   ollama list
-   ```
-   Model downloads are explicit user actions; ScreenArch never downloads models. Ollama normally serves its local API at `http://localhost:11434`.
-5. Start the app:
-   ```bash
-   streamlit run app.py
-   ```
+Open PowerShell and run these commands. Replace the destination if you want the repository somewhere else.
 
-If Tesseract is missing, the app still indexes image metadata but reports OCR as unavailable.
+```powershell
+git clone https://github.com/Parth-Bisht-227/ScreenArch.git
+Set-Location .\ScreenArch
+py -3 -m venv .venv
+.\.venv\Scripts\Activate.ps1
+python -m pip install --upgrade pip
+python -m pip install -r requirements.txt
+```
+
+If PowerShell blocks virtual-environment activation, allow scripts for just the current terminal and activate again:
+
+```powershell
+Set-ExecutionPolicy -Scope Process -ExecutionPolicy Bypass
+.\.venv\Scripts\Activate.ps1
+```
+
+Install Tesseract OCR separately using a Windows Tesseract installer. Ensure the folder containing `tesseract.exe` is on `PATH`, restart PowerShell, then check:
+
+```powershell
+tesseract --version
+```
+
+Install Ollama from [ollama.com/download](https://ollama.com/download/windows) and start the Ollama application. Confirm the command is available:
+
+```powershell
+ollama --version
+```
+
+If you choose `gemma3:4b`, download it explicitly and confirm the exact installed model name:
+
+```powershell
+ollama pull gemma3:4b
+ollama list
+```
+
+Model downloads require connectivity. To use another model, install it with Ollama and use its exact name from `ollama list` in ScreenArch. The app does not fetch a model on your behalf.
+
+From the activated virtual environment and the project directory, launch ScreenArch:
+
+```powershell
+streamlit run app.py
+```
+
+Open the local URL printed by Streamlit, usually `http://localhost:8501`. If that port is in use, launch with another port, for example `streamlit run app.py --server.port 8502`.
+
+## macOS and Linux
+
+Clone the repository, create/activate a virtual environment, and install the same requirements:
+
+```bash
+git clone https://github.com/Parth-Bisht-227/ScreenArch.git
+cd ScreenArch
+python3 -m venv .venv
+source .venv/bin/activate
+python -m pip install --upgrade pip
+python -m pip install -r requirements.txt
+```
+
+Install Tesseract with your system package manager (for example, `brew install tesseract` on macOS or `sudo apt install tesseract-ocr` on Ubuntu/Debian), then verify with `tesseract --version`. Install Ollama from [ollama.com/download](https://ollama.com/download), start it, and check `ollama --version`. If you want Gemma 3 4B, run `ollama pull gemma3:4b` and `ollama list`. Start the app with `streamlit run app.py`.
 
 ## First run
 
-Use a small folder of test screenshots first. In the sidebar, enter the folder path and click **Scan and index folder**. Search extracted text from the sidebar.
+1. In the sidebar, enter the path to a local screenshot folder. Start with a small test folder.
+2. Select **Scan and index folder**. ScreenArch indexes image metadata and runs Tesseract OCR locally. Use **Retry failed OCR** after correcting an OCR installation problem.
+3. Enter an organization instruction that explicitly names the categories. Comma-separated names or a numbered list with descriptions are supported, for example:
 
-## Local AI organization
+   ```text
+   Organize screenshots into following categories:
+   1. Content Inspirations [personal brand and growth]
+   2. Engineering Resources [study resources]
+   3. Job Help [career and job preparation]
+   4. Miscellaneous [anything that does not clearly fit]
+   ```
 
-In **AI organization**, enter a natural-language instruction that explicitly lists the categories (for example, "Organize screenshots into Work, Personal, and Needs Review."). ScreenArch accepts those category labels only; it does not allow the model to invent new categories. Enter the exact installed Gemma model name shown by `ollama list`, check that the model is available, then run classification. The model name can also be set with `SCREENARCH_OLLAMA_MODEL`; it defaults to the suggested `gemma3:4b`, which must still be installed locally.
+   Use **Needs Review** or **Miscellaneous** for uncertain screenshots; those results remain review-required when the model marks them uncertain.
+4. Enter the exact installed Ollama model name shown by `ollama list` (for example, `gemma3:4b`). Select **Check local model** to verify the local service and model.
+5. Select **Run classification** and follow the progress and per-image status. Use the category and review-status filters to inspect results.
+6. In **Review and approve**, change categories if needed and save category/approval changes. Approve screenshots explicitly; **Approve all suitable results** excludes review-required results and the **Needs Review** category.
+7. In **Organize approved screenshots**, choose an output directory. **Move (remove originals)** is selected by default and requires separate confirmation; choose **Copy (keep originals)** if you want to preserve source files. Only explicitly approved, non-review screenshots are organized.
 
-The default endpoint is `http://localhost:11434`. To use another local Ollama listener, set `SCREENARCH_OLLAMA_URL` to an `http://localhost`, `http://127.0.0.1`, or `http://[::1]` base URL. Non-local endpoints are rejected. Requests have timeouts and no cloud fallback.
+The sidebar search performs keyword search over extracted OCR text. The selected source folder scopes the gallery, search, classification results, and organization actions; switching folders keeps each folder's cached OCR and classification results in SQLite without mixing them in the current view. Full extracted text is available in each screenshot's collapsed **View extracted text** expander.
 
-The input limit controls how much OCR text (default 8,000 characters) is sent per screenshot; filename, dimensions, file size, and modified time are also sent. Screenshots with fewer than 20 alphanumeric characters or three OCR words are saved as **Needs Review** without a model call. Evidence must match a contiguous sequence of OCR words; case, whitespace, and punctuation differences are normalized, but paraphrases and invented words are rejected. Invalid evidence receives one focused correction attempt and is then sent to review if still invalid. Confidence is a model self-assessment from 0 to 1, not a calibrated probability; scores below 0.5 require review.
+## Troubleshooting
 
-The batch UI reports completed/total items, the current filename, elapsed time, per-image status, actual model-request durations, and total batch duration. Result states distinguish insufficient OCR, invalid model output, invalid evidence, low confidence, and Ollama request failures. Failures include their cause and can be retried with **Reclassify unchanged items**.
+- **`tesseract` is not found:** Install Tesseract separately, add the directory containing `tesseract.exe` to the Windows `PATH`, open a new terminal, and check `tesseract --version`. In the app, select **Retry failed OCR** after fixing PATH. Without Tesseract, indexing can still record image metadata but OCR will be unavailable.
+- **Ollama service unavailable:** Start the Ollama application/service, then try **Check local model** again. The default local API is `http://localhost:11434`; ScreenArch does not use a cloud fallback.
+- **Model name not found:** Run `ollama list`, install the desired model with `ollama pull <model-name>` if necessary, and enter the exact name shown by the list. The app will not download it automatically.
+- **Inference is slow:** Local inference time depends on the model, hardware, and screenshot count. Try a smaller compatible model or classify a smaller folder first; classification progress reports per-image status and request times.
+- **A screenshot is marked `Needs Review`:** This is expected when OCR has fewer than 20 alphanumeric characters or fewer than three words, or when a model response/schema/category/evidence is invalid, uncertain, or below the review confidence threshold. Check the validation reason shown in the result, then adjust its category and approval manually. Validation logs include only the failing stage and a non-content reason code, not OCR or model response text.
+- **Port conflict:** Use another port, for example `streamlit run app.py --server.port 8502`.
+- **Virtual environment activation fails:** Confirm you are in the `ScreenArch` project directory. In PowerShell, use the process-scoped execution-policy command in the Windows setup section, then activate `.venv` again. On macOS/Linux, activate with `source .venv/bin/activate`.
 
-### Review and organize
+## Privacy and limitations
 
-Classification never organizes files automatically. Edit categories and approve screenshots in **Review and approve**; **Approve all suitable results** only approves successful results that do not require review. Items categorized **Needs Review**, failed classifications, and unapproved items are not organized. Confidence alone never approves an item.
-
-In **Organize approved screenshots**, choose a source folder in the sidebar and an output directory. The default output is `ScreenArch_Organized` inside the selected source folder, with one subfolder per approved category. **Copy (keep originals)** is the default. **Move (remove originals)** requires a separate confirmation and only removes each original after a verified copy. Existing files are never overwritten; duplicate names receive a numbered suffix. Completed operations are recorded in SQLite so repeating the same operation does not duplicate successful copies.
-
-Classification, review decisions, and organization operation records are stored additively in the existing SQLite database; older OCR and classification rows remain usable.
+- OCR runs locally through the installed Tesseract executable. Classification sends OCR text and basic file metadata to the configured local Ollama service. The model is not sent image pixels.
+- The app has no cloud classification fallback. Initial package installation and Ollama model downloads require connectivity; do not assume every setup or update operation works offline.
+- Search is keyword-based. Semantic search and vision-based classification are not implemented.
+- Classification may be wrong. The confidence value is the model's self-assessment and is not calibrated; review and approve results before organizing files.
+- **Move (remove originals)** is the default organization action and requires separate confirmation. A source is removed only after its copy is verified; its SQLite OCR and classification records are retained, but the old path is hidden from the active gallery. **Copy (keep originals)** remains available. The generated `ScreenArch_Organized` folder and known organization output directories are excluded from subsequent indexing.
+- ScreenArch is a local application, not a hosted multi-user service. Extracted text, file metadata, review decisions, and organization records are stored in the local SQLite database at `data/screenshots.db`; protect that database as it may contain text from private images.
 
 ## Current limitations
 
-- Search is keyword-based; semantic search is not implemented.
-- OCR quality depends on image clarity, language packs, and Tesseract installation.
 - The first scan reads every image in the selected folder recursively.
 - The app currently displays up to 500 indexed records.
-- The index stores absolute paths, so moving source files can break links until re-indexed.
-- Classification is text-only and depends on available OCR; it does not analyze image pixels.
-
-## Roadmap
-
-- [ ] Better scan progress and cancellation
-- [ ] Duplicate detection UI
-- [ ] Local semantic embeddings and ranking
-- [x] Local AI categories with OCR evidence and review status
-- [ ] Export/search diagnostics and tests
+- The index stores absolute paths, so moving source files can break links until they are re-indexed.

@@ -34,11 +34,12 @@ def _safe_category_name(category):
 
 
 def _within(path, root):
-    try:
-        path.relative_to(root)
-        return True
-    except ValueError:
-        return False
+    path_identity = storage.normalize_path(path)
+    root_identity = storage.normalize_path(root)
+    return (
+        path_identity == root_identity
+        or path_identity.startswith(root_identity.rstrip("/") + "/")
+    )
 
 
 def _next_destination(directory, filename):
@@ -107,7 +108,8 @@ def organize_approved(results, output_dir, operation="copy", source_root=None):
         raise ValueError("Choose an output directory inside or outside the source folder, not the source folder itself.")
     result = {"copied": [], "moved": [], "skipped": [], "failed": []}
     approved_by_id = {
-        row["id"]: row for row in storage.get_approved_classifications()
+        row["id"]: row
+        for row in storage.get_approved_classifications(folder=source_root_path)
     }
 
     for row in results:
@@ -195,6 +197,8 @@ def organize_approved(results, output_dir, operation="copy", source_root=None):
                 and previous_destination.is_file()
                 and _file_hash(previous_destination) == previous["file_hash"]
             ):
+                if operation == "move" and not source.exists():
+                    storage.mark_item_removed(source)
                 result["skipped"].append({
                     "source": str(source),
                     "destination": previous["destination_path"],
@@ -219,6 +223,8 @@ def organize_approved(results, output_dir, operation="copy", source_root=None):
                     if operation == "copy" and source_hash != previous["file_hash"]:
                         source_hash = ""
                 if not source.exists() or source_hash == previous["file_hash"]:
+                    if operation == "move":
+                        storage.mark_item_removed(source)
                     storage.save_organization_operation(
                         classification_id,
                         str(source),
@@ -299,6 +305,7 @@ def organize_approved(results, output_dir, operation="copy", source_root=None):
             destination = _copy_exclusive(source, destination)
             if operation == "move":
                 source.unlink()
+                storage.mark_item_removed(source)
             storage.save_organization_operation(
                 classification_id,
                 str(source),

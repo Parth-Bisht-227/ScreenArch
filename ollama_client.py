@@ -98,7 +98,13 @@ def require_model_available(model, timeout=10):
     return models
 
 
-def generate(model, prompt, system, timeout=DEFAULT_TIMEOUT_SECONDS):
+def generate(
+    model,
+    prompt,
+    system,
+    timeout=DEFAULT_TIMEOUT_SECONDS,
+    format_schema=None,
+):
     response = _request(
         "POST",
         "/api/generate",
@@ -106,7 +112,7 @@ def generate(model, prompt, system, timeout=DEFAULT_TIMEOUT_SECONDS):
             "model": model,
             "system": system,
             "prompt": prompt,
-            "format": "json",
+            "format": format_schema if format_schema is not None else "json",
             "stream": False,
             "options": {"temperature": 0},
         },

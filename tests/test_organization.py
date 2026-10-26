@@ -94,6 +94,27 @@ def test_copy_preserves_original_and_repeated_run_is_idempotent(tmp_path, monkey
     assert len(list(output_root.rglob("capture*.png"))) == 1
 
 
+def test_organization_uses_only_approved_results_from_active_folder(tmp_path, monkeypatch):
+    monkeypatch.setattr(storage, "DB_PATH", tmp_path / "screenshots.db")
+    storage.init_db()
+    folder_a = tmp_path / "folder-a"
+    folder_b = tmp_path / "folder-b"
+    result_a = _add_result(folder_a / "a.png", approved=True)
+    result_b = _add_result(folder_b / "b.png", approved=True)
+
+    result = organization.organize_approved(
+        [result_a, result_b],
+        tmp_path / "organized",
+        source_root=str(folder_a).upper(),
+    )
+
+    assert len(result["copied"]) == 1
+    assert result["copied"][0]["source"] == result_a["path"]
+    assert result["skipped"] == []
+    assert (tmp_path / "organized" / "Work" / "a.png").is_file()
+    assert not (tmp_path / "organized" / "Work" / "b.png").exists()
+
+
 def test_duplicate_filenames_receive_distinct_destinations_without_overwrite(tmp_path, monkeypatch):
     monkeypatch.setattr(storage, "DB_PATH", tmp_path / "screenshots.db")
     storage.init_db()
@@ -136,7 +157,7 @@ def test_copy_filesystem_error_is_reported_and_retry_can_succeed(tmp_path, monke
     monkeypatch.setattr(storage, "DB_PATH", tmp_path / "screenshots.db")
     storage.init_db()
     row = _add_result(tmp_path / "source" / "capture.png", approved=True)
-    output_root = tmp_path / "organized"
+    output_root = tmp_path / "source" / "Sorted"
     original_copy = organization._copy_exclusive
 
     def fail_copy(*args, **kwargs):
@@ -172,6 +193,19 @@ def test_move_requires_approval_and_removes_source_only_after_verified_copy(tmp_
     assert not (tmp_path / "source" / "capture.png").exists()
     assert (output_root / "Work" / "capture.png").is_file()
     assert len(repeated["skipped"]) == 1
+    assert storage.list_items(folder=tmp_path / "source") == []
+    assert storage.list_classification_candidates(folder=tmp_path / "source") == []
+    with storage.connect() as connection:
+        assert connection.execute("SELECT COUNT(*) FROM screenshots").fetchone()[0] == 1
+        assert connection.execute(
+            "SELECT COUNT(*) FROM screenshot_classifications"
+        ).fetchone()[0] == 1
+
+    scan = storage.index_folder(tmp_path / "source")
+
+    assert scan["new"] == 0
+    assert storage.list_items(folder=tmp_path / "source") == []
+    assert storage.get_item(row["id"])["is_removed"] == 1
 
 
 def test_unapproved_review_and_failed_classifications_are_never_organized(tmp_path, monkeypatch):

@@ -3,6 +3,7 @@ from datetime import datetime, timezone
 from contextlib import contextmanager
 import hashlib
 import json
+import os
 import sqlite3
 
 from PIL import Image
@@ -10,11 +11,28 @@ from PIL import Image
 DB_PATH = Path(__file__).parent / "data" / "screenshots.db"
 IMAGE_EXTENSIONS = {".png", ".jpg", ".jpeg", ".webp", ".bmp", ".tif", ".tiff"}
 
+
+def normalize_path(path):
+    normalized = os.path.normpath(str(Path(path).expanduser().resolve()))
+    return normalized.replace("\\", "/").casefold()
+
+
+def _path_is_within(path, folder):
+    path_identity = normalize_path(path)
+    folder_identity = normalize_path(folder)
+    return int(
+        path_identity == folder_identity
+        or path_identity.startswith(folder_identity.rstrip("/") + "/")
+    )
+
+
 @contextmanager
 def connect():
     DB_PATH.parent.mkdir(parents=True, exist_ok=True)
     conn = sqlite3.connect(DB_PATH)
     conn.row_factory = sqlite3.Row
+    conn.create_function("path_identity", 1, normalize_path, deterministic=True)
+    conn.create_function("path_is_within", 2, _path_is_within, deterministic=True)
     try:
         yield conn
         conn.commit()
@@ -40,6 +58,13 @@ def init_db():
             indexed_at TEXT NOT NULL
         )
         """)
+        screenshot_columns = {
+            row["name"] for row in conn.execute("PRAGMA table_info(screenshots)")
+        }
+        if "is_removed" not in screenshot_columns:
+            conn.execute(
+                "ALTER TABLE screenshots ADD COLUMN is_removed INTEGER NOT NULL DEFAULT 0"
+            )
         conn.execute("CREATE INDEX IF NOT EXISTS idx_screenshots_path ON screenshots(path)")
         conn.execute("CREATE VIRTUAL TABLE IF NOT EXISTS screenshot_fts USING fts5(path UNINDEXED, ocr_text, content='')")
         conn.execute("""
@@ -135,15 +160,59 @@ def _ocr(path: Path):
             return "", None, None, "image-error"
 
 def _new_counts():
-    return {"new": 0, "updated": 0, "skipped": 0, "tesseract_missing": 0, "errors": []}
+    return {
+        "new": 0,
+        "updated": 0,
+        "skipped": 0,
+        "removed": 0,
+        "tesseract_missing": 0,
+        "errors": [],
+    }
+
+
+def _within_path(path, folder):
+    path_identity = normalize_path(path)
+    folder_identity = normalize_path(folder)
+    return (
+        path_identity == folder_identity
+        or path_identity.startswith(folder_identity.rstrip("/") + "/")
+    )
+
+
+def _organization_output_dirs(conn, folder):
+    outputs = {
+        normalize_path(Path(folder) / "ScreenArch_Organized"),
+    }
+    rows = conn.execute(
+        "SELECT DISTINCT output_dir FROM organization_operations WHERE output_dir != ''"
+    ).fetchall()
+    outputs.update(
+        normalize_path(row["output_dir"])
+        for row in rows
+        if _within_path(row["output_dir"], folder)
+    )
+    return outputs
+
+
+def mark_item_removed(path):
+    with connect() as conn:
+        cursor = conn.execute(
+            "UPDATE screenshots SET is_removed = 1 WHERE path_identity(path) = ?",
+            (normalize_path(path),),
+        )
+        if cursor.rowcount != 1:
+            raise ValueError(f"Indexed screenshot was not found for path: {path}")
+        return cursor.rowcount
+
 
 def _index_path(path: Path, conn, counts):
     try:
         stat = path.stat()
         resolved_path = str(path.resolve())
         existing = conn.execute(
-            "SELECT id, file_size, modified_at, ocr_status FROM screenshots WHERE path = ?",
-            (resolved_path,)
+            "SELECT id, path, file_size, modified_at, ocr_status, is_removed FROM screenshots "
+            "WHERE path_identity(path) = ?",
+            (normalize_path(resolved_path),)
         ).fetchone()
         unchanged = (
             existing
@@ -151,22 +220,37 @@ def _index_path(path: Path, conn, counts):
             and existing["modified_at"] == stat.st_mtime
         )
         if unchanged and existing["ocr_status"] == "complete":
+            if existing["is_removed"]:
+                conn.execute("UPDATE screenshots SET is_removed = 0 WHERE id = ?", (existing["id"],))
             counts["skipped"] += 1
             return
 
         text, width, height, status = _ocr(path)
         content_hash = _hash_file(path)
         indexed_at = datetime.now(timezone.utc).isoformat(timespec="seconds")
-        conn.execute("""
-            INSERT INTO screenshots(path, file_size, modified_at, content_hash, width, height, ocr_text, ocr_status, indexed_at)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-            ON CONFLICT(path) DO UPDATE SET
-              file_size=excluded.file_size, modified_at=excluded.modified_at,
-              content_hash=excluded.content_hash, width=excluded.width, height=excluded.height,
-              ocr_text=excluded.ocr_text, ocr_status=excluded.ocr_status, indexed_at=excluded.indexed_at
-        """, (resolved_path, stat.st_size, stat.st_mtime, content_hash, width, height, text, status, indexed_at))
-        conn.execute("DELETE FROM screenshot_fts WHERE path = ?", (resolved_path,))
-        conn.execute("INSERT INTO screenshot_fts(path, ocr_text) VALUES (?, ?)", (resolved_path, text))
+        stored_path = existing["path"] if existing else resolved_path
+        if existing:
+            conn.execute("""
+                UPDATE screenshots SET file_size = ?, modified_at = ?, content_hash = ?,
+                    width = ?, height = ?, ocr_text = ?, ocr_status = ?, indexed_at = ?,
+                    is_removed = 0
+                WHERE id = ?
+            """, (
+                stat.st_size, stat.st_mtime, content_hash, width, height,
+                text, status, indexed_at, existing["id"],
+            ))
+        else:
+            conn.execute("""
+                INSERT INTO screenshots(
+                    path, file_size, modified_at, content_hash, width, height,
+                    ocr_text, ocr_status, indexed_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """, (
+                stored_path, stat.st_size, stat.st_mtime, content_hash,
+                width, height, text, status, indexed_at,
+            ))
+        conn.execute("DELETE FROM screenshot_fts WHERE path = ?", (stored_path,))
+        conn.execute("INSERT INTO screenshot_fts(path, ocr_text) VALUES (?, ?)", (stored_path, text))
         if status == "tesseract-missing":
             counts["tesseract_missing"] += 1
         counts["new" if not existing else "updated"] += 1
@@ -175,19 +259,50 @@ def _index_path(path: Path, conn, counts):
 
 def index_folder(folder: Path):
     counts = _new_counts()
-    folder = folder.resolve()
+    folder = Path(folder).expanduser().resolve()
     with connect() as conn:
-        for path in folder.rglob("*"):
-            if path.is_file() and path.suffix.lower() in IMAGE_EXTENSIONS:
-                _index_path(path, conn, counts)
+        excluded_dirs = _organization_output_dirs(conn, folder)
+        image_paths = []
+        for current_dir, directory_names, filenames in os.walk(folder):
+            current_path = Path(current_dir)
+            directory_names[:] = [
+                name
+                for name in directory_names
+                if not any(
+                    _within_path(current_path / name, excluded)
+                    for excluded in excluded_dirs
+                )
+            ]
+            image_paths.extend(
+                current_path / filename
+                for filename in filenames
+                if Path(filename).suffix.lower() in IMAGE_EXTENSIONS
+            )
+        image_paths.sort(key=normalize_path)
+        discovered = {normalize_path(path) for path in image_paths}
+        params = [normalize_path(folder)]
+        query = (
+            "UPDATE screenshots SET is_removed = 1 "
+            "WHERE is_removed = 0 AND path_is_within(path, ?) = 1"
+        )
+        if discovered:
+            placeholders = ",".join("?" for _ in discovered)
+            query += f" AND path_identity(path) NOT IN ({placeholders})"
+            params.extend(discovered)
+        counts["removed"] = conn.execute(query, params).rowcount
+        for path in image_paths:
+            _index_path(path, conn, counts)
     return counts
 
-def retry_failed_ocr():
+def retry_failed_ocr(folder=None):
     counts = _new_counts()
     with connect() as conn:
-        paths = conn.execute(
-            "SELECT path FROM screenshots WHERE ocr_status != 'complete' ORDER BY indexed_at"
-        ).fetchall()
+        query = "SELECT path FROM screenshots WHERE ocr_status != 'complete' AND is_removed = 0"
+        params = []
+        if folder is not None:
+            query += " AND path_is_within(path, ?) = 1"
+            params.append(normalize_path(folder))
+        paths = conn.execute(query + " ORDER BY indexed_at", params).fetchall()
         for row in paths:
             _index_path(Path(row["path"]), conn, counts)
     return counts
@@ -195,21 +310,34 @@ def retry_failed_ocr():
 def _dict(row):
     return dict(row) if row else None
 
-def list_items(limit=500):
+def list_items(limit=500, folder=None):
+    query = "SELECT * FROM screenshots WHERE is_removed = 0"
+    params = []
+    if folder is not None:
+        query += " AND path_is_within(path, ?) = 1"
+        params.append(normalize_path(folder))
+    query += " ORDER BY indexed_at DESC LIMIT ?"
+    params.append(limit)
     with connect() as conn:
-        rows = conn.execute("SELECT * FROM screenshots ORDER BY indexed_at DESC LIMIT ?", (limit,)).fetchall()
+        rows = conn.execute(query, params).fetchall()
     return [_dict(r) for r in rows]
 
-def search_items(query, limit=500):
+def search_items(query, limit=500, folder=None):
     # Use substring search for predictable behavior with punctuation and OCR text.
     # Semantic search will be a separate optional layer.
     q = f"%{query.strip()}%"
+    sql = """
+        SELECT * FROM screenshots
+        WHERE is_removed = 0 AND (path LIKE ? OR ocr_text LIKE ?)
+    """
+    params = [q, q]
+    if folder is not None:
+        sql += " AND path_is_within(path, ?) = 1"
+        params.append(normalize_path(folder))
+    sql += " ORDER BY indexed_at DESC LIMIT ?"
+    params.append(limit)
     with connect() as conn:
-        rows = conn.execute("""
-            SELECT * FROM screenshots
-            WHERE path LIKE ? OR ocr_text LIKE ?
-            ORDER BY indexed_at DESC LIMIT ?
-        """, (q, q, limit)).fetchall()
+        rows = conn.execute(sql, params).fetchall()
     return [_dict(r) for r in rows]
 
 def get_item(item_id):
@@ -217,9 +345,15 @@ def get_item(item_id):
         row = conn.execute("SELECT * FROM screenshots WHERE id = ?", (item_id,)).fetchone()
     return _dict(row)
 
-def list_classification_candidates():
+def list_classification_candidates(folder=None):
+    query = "SELECT * FROM screenshots WHERE is_removed = 0"
+    params = []
+    if folder is not None:
+        query += " AND path_is_within(path, ?) = 1"
+        params.append(normalize_path(folder))
+    query += " ORDER BY indexed_at DESC"
     with connect() as conn:
-        rows = conn.execute("SELECT * FROM screenshots ORDER BY indexed_at DESC").fetchall()
+        rows = conn.execute(query, params).fetchall()
     return [_dict(row) for row in rows]
 
 def get_saved_classification(item_id, prompt_hash, model, input_hash):
@@ -263,36 +397,64 @@ def save_classification(item_id, prompt_hash, prompt, model, input_hash, result)
             created_at
         ))
 
-def list_classifications(prompt_hash, model):
+def list_classifications(prompt_hash, model, folder=None):
+    folder_clause = ""
+    params = [prompt_hash, model]
+    if folder is not None:
+        folder_clause = " AND path_is_within(s.path, ?) = 1"
+        params.append(normalize_path(folder))
     with connect() as conn:
         rows = conn.execute("""
             SELECT c.*, s.path, s.file_size, s.modified_at, s.width, s.height,
                    s.ocr_text, s.ocr_status
             FROM screenshot_classifications AS c
             JOIN screenshots AS s ON s.id = c.screenshot_id
-            WHERE c.prompt_hash = ? AND c.model = ?
+            WHERE c.prompt_hash = ? AND c.model = ? AND s.is_removed = 0
+        """ + folder_clause + """
             ORDER BY c.created_at DESC
-        """, (prompt_hash, model)).fetchall()
+        """, params).fetchall()
     return [_dict(row) for row in rows]
 
-def save_review_decision(classification_id, category, approved):
+def save_review_decision(classification_id, category, approved, folder=None):
     category = category.strip()
     if not category:
         raise ValueError("Choose a category before saving the review decision.")
+    folder_clause = ""
+    params = [category, int(bool(approved)), classification_id]
+    if folder is not None:
+        folder_clause = " AND EXISTS ("
+        folder_clause += "SELECT 1 FROM screenshots s "
+        folder_clause += (
+            "WHERE s.id = screenshot_classifications.screenshot_id AND s.is_removed = 0 "
+        )
+        folder_clause += "AND path_is_within(s.path, ?) = 1)"
+        params.append(normalize_path(folder))
     with connect() as conn:
         cursor = conn.execute("""
             UPDATE screenshot_classifications
             SET approved_category = ?, approved = ?
             WHERE id = ?
-        """, (category, int(bool(approved)), classification_id))
+        """ + folder_clause, params)
         if cursor.rowcount != 1:
             raise ValueError(f"Classification {classification_id} no longer exists.")
 
-def approve_suitable_classifications(classification_ids):
+def approve_suitable_classifications(classification_ids, folder=None):
     ids = list(dict.fromkeys(classification_ids))
     if not ids:
         return 0
     placeholders = ",".join("?" for _ in ids)
+    folder_clause = ""
+    params = list(ids)
+    if folder is not None:
+        folder_clause = """
+            AND EXISTS (
+                SELECT 1 FROM screenshots s
+                WHERE s.id = screenshot_classifications.screenshot_id
+                  AND s.is_removed = 0
+                  AND path_is_within(s.path, ?) = 1
+            )
+        """
+        params.append(normalize_path(folder))
     with connect() as conn:
         cursor = conn.execute(f"""
             UPDATE screenshot_classifications
@@ -301,10 +463,15 @@ def approve_suitable_classifications(classification_ids):
               AND result_status = 'classified'
               AND needs_review = 0
               AND lower(COALESCE(approved_category, category)) != 'needs review'
-        """, ids)
+        """ + folder_clause, params)
         return cursor.rowcount
 
-def get_approved_classifications():
+def get_approved_classifications(folder=None):
+    folder_clause = ""
+    params = []
+    if folder is not None:
+        folder_clause = " AND path_is_within(s.path, ?) = 1"
+        params.append(normalize_path(folder))
     with connect() as conn:
         rows = conn.execute("""
             SELECT c.*, s.path, s.file_size AS source_file_size,
@@ -312,9 +479,10 @@ def get_approved_classifications():
                    s.content_hash AS source_content_hash
             FROM screenshot_classifications AS c
             JOIN screenshots AS s ON s.id = c.screenshot_id
-            WHERE c.approved = 1
+            WHERE c.approved = 1 AND s.is_removed = 0
+        """ + folder_clause + """
             ORDER BY c.id
-        """).fetchall()
+        """, params).fetchall()
     results = [_dict(row) for row in rows]
     for row in results:
         row["category"] = row["approved_category"] or row["category"]

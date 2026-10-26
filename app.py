@@ -14,17 +14,23 @@ import organization
 import storage
 from storage import init_db, list_items, index_folder, retry_failed_ocr, search_items
 
-st.set_page_config(page_title="Screenshot Archaeologist", page_icon="🔎", layout="wide")
+st.set_page_config(page_title="ScreenArch", page_icon="🔎", layout="wide")
 init_db()
 
 
-def _start_classification(prompt, model_name, max_ocr_chars, force):
+def _concise(text, limit=160):
+    text = " ".join(text.split())
+    return text if len(text) <= limit else text[:limit - 3] + "..."
+
+
+def _start_classification(prompt, model_name, max_ocr_chars, force, folder):
     events = queue.Queue()
     state = {
         "events": events,
         "started_at": time.perf_counter(),
         "completed": 0,
-        "total": len(storage.list_classification_candidates()),
+        "total": 0,
+        "folder": storage.normalize_path(folder),
         "current_path": "",
         "history": [],
         "finished": False,
@@ -40,6 +46,7 @@ def _start_classification(prompt, model_name, max_ocr_chars, force):
                 max_ocr_chars=max_ocr_chars,
                 force=force,
                 progress_callback=events.put,
+                folder=folder,
             )
         except Exception as exc:
             events.put({
@@ -54,7 +61,7 @@ def _start_classification(prompt, model_name, max_ocr_chars, force):
 
 
 @st.fragment(run_every="1s")
-def _classification_progress():
+def _classification_progress(render=True):
     state = st.session_state.get("classification_progress")
     if not state:
         return
@@ -66,16 +73,23 @@ def _classification_progress():
             break
         if event["event"] == "started":
             state["current_path"] = event["path"]
+            state["total"] = event["total"]
         elif event["event"] == "completed":
             state["completed"] = event["completed"]
+            state["total"] = event["total"]
             state["current_path"] = event["path"]
             state["history"].append(event)
         elif event["event"] == "finished":
             state["finished"] = True
             state["result"] = event["result"]
+            state["completed"] = event["result"]["completed"]
+            state["total"] = event["result"]["total"]
         elif event["event"] == "error":
             state["finished"] = True
             state["error"] = event["message"]
+
+    if not render:
+        return
 
     total = state["total"]
     completed = state["completed"]
@@ -137,18 +151,24 @@ with st.sidebar:
         placeholder=r"C:\Users\you\Pictures\Screenshots",
         key="source_folder",
     )
+    selected_folder = Path(folder).expanduser().resolve() if folder.strip() else None
+    active_folder = (
+        str(selected_folder)
+        if selected_folder is not None and selected_folder.is_dir()
+        else None
+    )
     st.caption("Start with a small test folder. OCR can take a while on large collections.")
     if st.button("Scan and index folder", type="primary", width="stretch"):
         if not folder.strip():
             st.error("Enter a folder path first.")
-        elif not Path(folder).expanduser().is_dir():
+        elif active_folder is None:
             st.error("That folder does not exist on this computer.")
         else:
             with st.spinner("Scanning images and extracting text locally..."):
-                result = index_folder(Path(folder).expanduser())
+                result = index_folder(selected_folder)
             st.success(
-                f"Finished. {result['new']} new, {result['updated']} updated, "
-                f"{result['skipped']} skipped."
+                f"Finished. {result['new']} new, {result['updated']} changed, "
+                f"{result['skipped']} unchanged, {result['removed']} removed."
             )
             if result["tesseract_missing"]:
                 st.error(
@@ -161,9 +181,9 @@ with st.sidebar:
                 with st.expander("Show errors"):
                     st.write(result["errors"][:20])
 
-    if st.button("Retry failed OCR", width="stretch"):
-        with st.spinner("Retrying failed OCR for indexed screenshots..."):
-            result = retry_failed_ocr()
+    if st.button("Retry failed OCR", width="stretch", disabled=not active_folder):
+        with st.spinner("Retrying failed OCR for this folder..."):
+            result = retry_failed_ocr(selected_folder)
         st.success(f"Finished. {result['updated']} retried, {result['skipped']} skipped.")
         if result["tesseract_missing"]:
             st.error(
@@ -178,11 +198,19 @@ with st.sidebar:
 
     st.divider()
     st.header("Search")
-    query = st.text_input("Search screenshots", placeholder="e.g. Python error, payment receipt")
+    query = st.text_input(
+        "Search screenshots",
+        placeholder="e.g. Python error, payment receipt",
+        key="screenshot_search",
+    )
     st.caption("Keyword search matches text found by OCR.")
 
-st.title("🔎 Screenshot Archaeologist")
-st.caption("A local-first searchable archive for your screenshots. Images stay where they are; extracted text and metadata are stored in a local SQLite database.")
+st.title("🔎 ScreenArch")
+st.subheader("The archaeologist for your screenshots.")
+st.caption(
+    "A local-first searchable archive for your screenshots. Images stay where they are; "
+    "extracted text and metadata are stored in a local SQLite database."
+)
 
 st.header("AI organization")
 st.caption(
@@ -211,7 +239,11 @@ max_ocr_chars = st.slider(
     value=classification.DEFAULT_MAX_OCR_CHARS,
     step=1000,
 )
-candidates = classification.storage.list_classification_candidates()
+candidates = (
+    classification.storage.list_classification_candidates(folder=active_folder)
+    if active_folder
+    else []
+)
 eligible = classification.eligible_count(candidates)
 st.metric("Eligible for OCR-based classification", f"{eligible} of {len(candidates)} indexed screenshots")
 st.caption(
@@ -222,6 +254,12 @@ st.caption(
 check_col, run_col, force_col = st.columns([1, 1, 2], vertical_alignment="bottom")
 progress_state = st.session_state.get("classification_progress")
 classification_running = bool(progress_state and not progress_state["finished"])
+folder_identity = storage.normalize_path(active_folder) if active_folder else None
+active_progress_state = (
+    progress_state
+    if folder_identity and progress_state and progress_state["folder"] == folder_identity
+    else None
+)
 with check_col:
     if st.button("Check local model", width="stretch"):
         try:
@@ -237,19 +275,19 @@ with run_col:
         "Run classification",
         type="primary",
         width="stretch",
-        disabled=classification_running,
+        disabled=classification_running or not active_folder,
     ):
         _start_classification(
             organization_prompt,
             model_name,
             max_ocr_chars,
             force_classification,
+            active_folder,
         )
 
-progress_state = st.session_state.get("classification_progress")
-if progress_state and progress_state["finished"]:
-    if progress_state.get("result"):
-        result = progress_state["result"]
+if active_progress_state and active_progress_state["finished"]:
+    if active_progress_state.get("result"):
+        result = active_progress_state["result"]
         st.progress(
             min(result["completed"] / result["total"], 1.0) if result["total"] else 0.0,
             text=f"Completed {result['completed']} of {result['total']}",
@@ -259,7 +297,7 @@ if progress_state and progress_state["finished"]:
             f"Batch finished: {result['classified']} saved, {result['skipped']} unchanged, "
             f"{result['needs_review']} need review, {result['failed']} failed."
         )
-        for event in progress_state["history"][-10:]:
+        for event in active_progress_state["history"][-10:]:
             request_durations = ", ".join(
                 f"{duration:.1f}s"
                 for duration in event.get("request_durations_seconds", [])
@@ -270,10 +308,21 @@ if progress_state and progress_state["finished"]:
                 f"(total {event.get('request_seconds', 0.0):.1f}s)"
             )
     else:
-        st.error(f"Classification did not finish: {progress_state['error']}")
-elif progress_state:
+        st.error(f"Classification did not finish: {active_progress_state['error']}")
+elif active_progress_state:
     _classification_progress()
-current_results = classification.get_results(organization_prompt, model_name, max_ocr_chars)
+elif progress_state:
+    _classification_progress(render=False)
+if classification_running and not active_progress_state:
+    st.info("Classification is still running for the previously selected folder.")
+current_results = (
+    classification.get_results(
+        organization_prompt, model_name, max_ocr_chars, folder=active_folder
+    )
+    if active_folder
+    else []
+)
+visible_results_by_path = {}
 if current_results:
     st.subheader("Classification results")
     categories = ["All categories"] + sorted({row["category"] for row in current_results}, key=str.casefold)
@@ -295,14 +344,8 @@ if current_results:
                 "Category": row["category"],
                 "Status": row["result_status"].replace("_", " "),
                 "Review status": "Needs review" if row["needs_review"] else "No review needed",
-                "Confidence (self-assessed)": round(row["confidence"], 2),
-                "Reason": row["reason"],
-                "OCR evidence": row["evidence"],
-                "Model request durations (s)": ", ".join(
-                    f"{duration:.2f}" for duration in row["model_request_durations"]
-                ),
-                "Total model request seconds": round(row["model_duration_seconds"], 2),
-                "Path": row["path"],
+                "Reason": _concise(row["reason"], 120),
+                "OCR evidence": _concise(row["evidence"], 120),
             }
             for row in visible_results
         ],
@@ -310,6 +353,9 @@ if current_results:
         width="stretch",
         hide_index=True,
     )
+    visible_results_by_path = {
+        storage.normalize_path(row["path"]): row for row in visible_results
+    }
 
     st.subheader("Review and approve")
     st.caption(
@@ -365,7 +411,9 @@ if current_results:
             approved = bool(row["Approved"]) and (
                 selected_category.casefold() != classification.REVIEW_CATEGORY.casefold()
             )
-            storage.save_review_decision(row["ID"], selected_category, approved)
+            storage.save_review_decision(
+                row["ID"], selected_category, approved, folder=active_folder
+            )
         st.success("Review decisions saved.")
         st.rerun()
 
@@ -377,21 +425,24 @@ if current_results:
             and not row["needs_review"]
             and row["category"].casefold() != classification.REVIEW_CATEGORY.casefold()
         ]
-        approved_count = storage.approve_suitable_classifications(suitable_ids)
+        approved_count = storage.approve_suitable_classifications(
+            suitable_ids, folder=active_folder
+        )
         st.success(f"Approved {approved_count} suitable result(s). Review-required items were not approved.")
         st.session_state.pop(editor_key, None)
         st.rerun()
 
     st.subheader("Organize approved screenshots")
     st.caption(
-        "The default is a copy into ScreenArch_Organized under the selected source folder. "
-        "Moving is opt-in and removes the originals after a verified copy."
+        "The default is to move approved screenshots into category folders under "
+        "ScreenArch_Organized. Each move requires confirmation and is verified before "
+        "the original path is removed from the active gallery."
     )
-    if folder.strip():
-        source_folder_exists = Path(folder).expanduser().is_dir()
-        default_output = str(Path(folder).expanduser() / "ScreenArch_Organized")
+    if active_folder:
+        source_folder_exists = True
+        default_output = str(selected_folder / "ScreenArch_Organized")
         output_key = "organization_output_" + hashlib.sha256(
-            str(Path(folder).expanduser().resolve()).encode("utf-8")
+            storage.normalize_path(selected_folder).encode("utf-8")
         ).hexdigest()[:10]
         output_dir = st.text_input(
             "Output directory",
@@ -404,14 +455,17 @@ if current_results:
         output_dir = ""
     if folder.strip() and not source_folder_exists:
         st.error("The selected source folder does not exist or is not a directory.")
-    operation = st.selectbox("File operation", ["Copy (keep originals)", "Move (remove originals)"])
+    operation = st.selectbox(
+        "File operation",
+        ["Move (remove originals)", "Copy (keep originals)"],
+    )
     move_confirmed = False
     if operation.startswith("Move"):
         move_confirmed = st.checkbox(
             "I understand that moving removes the original screenshots after the copy is verified."
         )
     organize_disabled = (
-        not folder.strip()
+        not active_folder
         or not source_folder_exists
         or not output_dir.strip()
         or (operation.startswith("Move") and not move_confirmed)
@@ -428,7 +482,7 @@ if current_results:
                 current_results,
                 output_dir,
                 operation=operation_mode,
-                source_root=folder,
+                source_root=active_folder,
             )
         except ValueError as exc:
             st.error(str(exc))
@@ -452,11 +506,20 @@ elif organization_prompt.strip():
         "but are not presented as if they match changed settings."
     )
 
-items = search_items(query) if query.strip() else list_items()
+items = (
+    search_items(query, folder=active_folder)
+    if query.strip() and active_folder
+    else list_items(folder=active_folder)
+    if active_folder
+    else []
+)
 st.write(f"**{len(items)}** screenshot(s) {'matching your search' if query.strip() else 'indexed'}")
 
 if not items:
-    st.info("No screenshots to show yet. Enter a folder path in the sidebar and click **Scan and index folder**.")
+    if not active_folder:
+        st.info("Select an existing source folder to view or search its indexed screenshots.")
+    else:
+        st.info("No screenshots to show yet. Click **Scan and index folder** to index this folder.")
 else:
     cols_per_row = 3
     for start in range(0, len(items), cols_per_row):
@@ -464,6 +527,7 @@ else:
         for col, item in zip(cols, items[start:start + cols_per_row]):
             with col:
                 path = Path(item["path"])
+                result = visible_results_by_path.get(storage.normalize_path(path))
                 if path.exists():
                     try:
                         img = Image.open(path)
@@ -474,17 +538,21 @@ else:
                 else:
                     st.warning("Original image not found at its indexed path.")
                 st.markdown(f"**{path.name}**")
-                st.caption(f"{item['width']} × {item['height']} · {item['ocr_status']}")
+                st.caption(f"{item['width']} × {item['height']} · OCR: {item['ocr_status']}")
+                if result:
+                    review_status = "Needs review" if result["needs_review"] else "No review needed"
+                    st.markdown(f"**{result['category']}** · {review_status}")
+                    st.caption(_concise(result["reason"]))
+                    if result["evidence"]:
+                        st.caption(f"Evidence: {_concise(result['evidence'])}")
                 if item["ocr_text"]:
-                    excerpt = item["ocr_text"].strip().replace("\n", " ")
-                    st.write((excerpt[:240] + "…") if len(excerpt) > 240 else excerpt)
+                    with st.expander("View extracted text"):
+                        st.text(item["ocr_text"])
                 else:
                     st.caption("No text extracted.")
                 with st.expander("Details"):
                     st.code(item["path"])
                     st.write(f"Indexed: {item['indexed_at']}")
-                    if item["ocr_text"]:
-                        st.text_area("Extracted text", item["ocr_text"], height=160, key=f"text_{item['id']}")
                     if st.button("Open original file location", key=f"open_{item['id']}"):
                         st.info(
                             "Copy the path above into File Explorer. Copy is the default; "
